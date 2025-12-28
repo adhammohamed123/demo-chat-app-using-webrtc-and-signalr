@@ -1,0 +1,265 @@
+﻿<!DOCTYPE html>
+<html lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Clone .NET</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #e5ddd5;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }
+
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            width: 100%;
+            max-width: 500px;
+            text-align: center;
+        }
+
+        .video-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 20px;
+            width: 100%;
+            max-width: 800px;
+        }
+
+        video {
+            width: 100%;
+            background: #262d31;
+            border-radius: 8px;
+            height: 200px;
+            object-fit: cover;
+        }
+
+        #localVideo {
+            transform: scaleX(-1);
+            border: 2px solid #075e54;
+        }
+
+        #remoteVideo {
+            border: 2px solid #34b7f1;
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: center;
+            margin-top: 15px;
+        }
+
+        button {
+            padding: 10px 15px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            color: white;
+            font-weight: bold;
+        }
+
+        .btn-video {
+            background: #25d366;
+        }
+
+        .btn-audio {
+            background: #34b7f1;
+        }
+
+        .btn-mute {
+            background: #607d8b;
+        }
+
+        .btn-switch {
+            background: #ff9800;
+        }
+
+        input {
+            padding: 10px;
+            width: 70%;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+
+        .status {
+            margin: 10px;
+            font-size: 0.9em;
+            color: #555;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="card">
+        <h3>WhatsApp WebRTC Demo</h3>
+        <p>Your ID: <strong id="myId" style="color:#075e54">Connecting...</strong></p>
+        <input type="text" id="targetId" placeholder="Paste Remote ID here..." />
+
+        <div class="controls">
+            <button class="btn-video" onclick="startCall(true)">Video Call</button>
+            <button class="btn-audio" onclick="startCall(false)">Audio Call</button>
+        </div>
+
+        <div class="controls">
+            <button id="muteBtn" class="btn-mute" onclick="toggleAudio()">Mute Mic</button>
+            <button id="camBtn" class="btn-mute" onclick="toggleVideo()">Cam Off</button>
+            <button class="btn-switch" onclick="switchCamera()">Switch Camera</button>
+        </div>
+        <div id="status" class="status">Initializing...</div>
+    </div>
+
+    <div class="video-grid">
+        <video id="localVideo" autoplay muted playsinline></video>
+        <video id="remoteVideo" autoplay playsinline></video>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/6.0.1/signalr.min.js"></script>
+    <script>
+        let localStream, peerConnection;
+        let isAudioMuted = false, isVideoOff = false;
+        let currentFacingMode = 'user';
+        const statusDiv = document.getElementById('status');
+        const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+        const connection = new signalR.HubConnectionBuilder().withUrl("/callHub").build();
+
+        // 1. Get initial Media
+        async function getMedia(videoEnabled) {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: videoEnabled ? { facingMode: currentFacingMode } : false,
+                    audio: true
+                });
+                localStream = stream;
+                document.getElementById('localVideo').srcObject = stream;
+                return true;
+            } catch (e) {
+                statusDiv.innerText = "Camera/Mic Access Denied";
+                return false;
+            }
+        }
+
+        // 2. Initialize WebRTC
+        function createPeerConnection(targetId) {
+            peerConnection = new RTCPeerConnection(rtcConfig);
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+            peerConnection.onicecandidate = e => {
+                if (e.candidate) connection.invoke("SendSignal", JSON.stringify({ candidate: e.candidate }), targetId);
+            };
+
+            peerConnection.ontrack = e => {
+                document.getElementById('remoteVideo').srcObject = e.streams[0];
+            };
+        }
+
+        // 3. Start Call
+        async function startCall(withVideo) {
+            const targetId = document.getElementById('targetId').value;
+            if (!targetId) return alert("Enter Target ID");
+
+            const hasMedia = await getMedia(withVideo);
+            if (!hasMedia) return;
+
+            createPeerConnection(targetId);
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            connection.invoke("SendSignal", JSON.stringify({ sdp: offer }), targetId);
+            statusDiv.innerText = "Calling...";
+        }
+
+        // 4. Handle Signaling
+        connection.on("ReceiveSignal", async (fromId, signal) => {
+            const data = JSON.parse(signal);
+            if (!peerConnection) {
+                await getMedia(true); // Default to video for incoming
+                createPeerConnection(fromId);
+            }
+
+            if (data.sdp) {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+                if (data.sdp.type === 'offer') {
+                    const answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
+                    connection.invoke("SendSignal", JSON.stringify({ sdp: answer }), fromId);
+                }
+            } else if (data.candidate) {
+                await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+            }
+        });
+
+        // 5. Controls
+        function toggleAudio() {
+            isAudioMuted = !isAudioMuted;
+            localStream.getAudioTracks()[0].enabled = !isAudioMuted;
+            document.getElementById('muteBtn').innerText = isAudioMuted ? "Unmute Mic" : "Mute Mic";
+        }
+
+        function toggleVideo() {
+            if (localStream.getVideoTracks().length > 0) {
+                isVideoOff = !isVideoOff;
+                localStream.getVideoTracks()[0].enabled = !isVideoOff;
+                document.getElementById('camBtn').innerText = isVideoOff ? "Cam On" : "Cam Off";
+            }
+        }
+
+        async function switchCamera() {
+            if (!localStream) return;
+
+            currentFacingMode = (currentFacingMode === 'user') ? 'environment' : 'user';
+            console.log("Attempting switch to:", currentFacingMode);
+
+            // 1. إيقاف الـ Tracks الحالية تماماً لتفريغ الكاميرا
+            localStream.getTracks().forEach(track => track.stop());
+
+            // 2. محاولة الحصول على الكاميرا الجديدة
+            let constraints = {
+                video: { facingMode: currentFacingMode },
+                audio: true
+            };
+
+            try {
+                // المحاولة الأولى
+                localStream = await navigator.mediaDevices.getUserMedia(constraints);
+            } catch (e) {
+                console.warn("Exact match failed, trying fallback...");
+                // المحاولة الثانية (لو فشل في إيجاد 'environment' بالتحديد)
+                constraints.video.facingMode = (currentFacingMode === 'environment') ? 'user' : 'environment';
+                localStream = await navigator.mediaDevices.getUserMedia(constraints);
+            }
+
+            // 3. تحديث العرض المحلي (Local Video)
+            document.getElementById('localVideo').srcObject = localStream;
+
+            // 4. تحديث الـ PeerConnection لو المكالمة شغالة
+            if (peerConnection) {
+                const videoTrack = localStream.getVideoTracks()[0];
+                const audioTrack = localStream.getAudioTracks()[0];
+
+                const videoSender = peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
+                const audioSender = peerConnection.getSenders().find(s => s.track && s.track.kind === 'audio');
+
+                if (videoSender) await videoSender.replaceTrack(videoTrack);
+                if (audioSender) await audioSender.replaceTrack(audioTrack);
+            }
+
+            statusDiv.innerText = "Camera: " + currentFacingMode;
+        }
+
+        connection.start().then(() => {
+            document.getElementById('myId').innerText = connection.connectionId;
+            statusDiv.innerText = "Ready to connect";
+        });
+    </script>
+</body>
+</html>
